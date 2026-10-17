@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>3D Fly Room: Autonomous Brain</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: none;
+    }
+    body {
+      background: #090d16;
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+      overflow: hidden;
+      height: 100vh;
+      width: 100vw;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      background: radial-gradient(circle at center, #131b2e 0%, #070a10 100%);
+    }
+    #hud {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 12px;
+      line-height: 1.6;
+      pointer-events: none;
+    }
+    .bar-bg {
+      width: 80px;
+      height: 6px;
+      background: #1e293b;
+      border-radius: 3px;
+      display: inline-block;
+      vertical-align: middle;
+      overflow: hidden;
+      margin-left: 6px;
+    }
+    .bar-fill {
+      height: 100%;
+      transition: width 0.1s linear;
+    }
+    #toolbar {
+      position: absolute;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 10px;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid #334155;
+      padding: 8px;
+      border-radius: 12px;
+    }
+    button {
+      background: #1e293b;
+      color: #cbd5e1;
+      border: 1px solid #334155;
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button.active {
+      background: #2563eb;
+      color: #fff;
+      border-color: #60a5fa;
+    }
+    #hints {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 11px;
+      color: #94a3b8;
+      text-align: right;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+
+<div id="hud">
+  <div><b>ДРОЗОФИЛА 3D</b></div>
+  <div>Сытость: <span class="bar-bg"><span id="bar-hunger" class="bar-fill" style="background:#ef4444; width:80%;"></span></span></div>
+  <div>Энергия: <span class="bar-bg"><span id="bar-energy" class="bar-fill" style="background:#eab308; width:100%;"></span></span></div>
+  <div>Статус: <span id="status-text" style="color:#60a5fa; font-weight:bold;">В полете</span></div>
+</div>
+
+<div id="hints">
+  Вращение: Зажать ЛКМ / Палец и тянуть<br>
+  Клик: Бросить еду в комнату
+</div>
+
+<div id="toolbar">
+  <button id="btn-sugar" class="active">🍬 Сахар</button>
+  <button id="btn-fruit">🍌 Банан</button>
+  <button id="btn-lamp">💡 Лампа: ВКЛ</button>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let W = canvas.width = window.innerWidth;
+let H = canvas.height = window.innerHeight;
+
+window.addEventListener('resize', () => {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+});
+
+// Камера (Сферические координаты)
+let camDist = 650;
+let camYaw = 0.4;
+let camPitch = 0.35;
+let isDragging = false;
+let startX = 0, startY = 0;
+let moved = false;
+
+// Состояние игры
+let lampOn = true;
+let currentTool = 'sugar';
+
+const btnSugar = document.getElementById('btn-sugar');
+const btnFruit = document.getElementById('btn-fruit');
+const btnLamp = document.getElementById('btn-lamp');
+
+btnSugar.onclick = () => { currentTool = 'sugar'; btnSugar.classList.add('active'); btnFruit.classList.remove('active'); };
+btnFruit.onclick = () => { currentTool = 'fruit'; btnFruit.classList.add('active'); btnSugar.classList.remove('active'); };
+btnLamp.onclick = () => {
+  lampOn = !lampOn;
+  btnLamp.innerText = lampOn ? '💡 Лампа: ВКЛ' : '💡 Лампа: ВЫКЛ';
+  btnLamp.style.background = lampOn ? '#1e293b' : '#334155';
+};
+
+// Объекты комнаты
+const lampPos = { x: 0, y: -220, z: 0 };
+let foods = [
+  { x: 60, y: 110, z: 40, size: 10, nutrition: 0.4, type: 'fruit', color: '#f59e0b', life: 100 }
+];
+
+// Муха
+const fly = {
+  x: 0, y: -50, z: 0,
+  vx: 0, vy: 0, vz: 0,
+  hunger: 80,
+  energy: 100,
+  wingBeat: 0,
+  state: 'FLYING',
+  target: { x: 0, y: -50, z: 0 }
+};
+
+// Ввод (Мышь / Тач)
+window.addEventListener('pointerdown', (e) => {
+  if (e.target.closest('#toolbar') || e.target.closest('#hud')) return;
+  isDragging = true;
+  startX = e.clientX;
+  startY = e.clientY;
+  moved = false;
+});
+
+window.addEventListener('pointermove', (e) => {
+  if (!isDragging) return;
+  const dx = e.clientX - startX;
+  const dy = e.clientY - startY;
+  if (Math.hypot(dx, dy) > 5) moved = true;
+
+  camYaw += dx * 0.006;
+  camPitch = Math.max(0.05, Math.min(Math.PI / 2.1, camPitch + dy * 0.006));
+  startX = e.clientX;
+  startY = e.clientY;
+});
+
+window.addEventListener('pointerup', (e) => {
+  if (!moved && isDragging) {
+    // Если был просто клик, а не вращение — спавним еду на столе
+    const rx = (Math.random() - 0.5) * 220;
+    const rz = (Math.random() - 0.5) * 160;
+    foods.push({
+      x: rx, y: 115, z: rz,
+      size: currentTool === 'sugar' ? 8 : 12,
+      nutrition: currentTool === 'sugar' ? 0.35 : 0.7,
+      type: currentTool,
+      color: currentTool === 'sugar' ? '#fef08a' : '#f59e0b',
+      life: 100
+    });
+  }
+  isDragging = false;
+});
+
+// Математика 3D проекции на экран
+function project(p) {
+  // 1. Поворот камеры по рысканию (Yaw)
+  const cosY = Math.cos(camYaw), sinY = Math.sin(camYaw);
+  let x1 = p.x * cosY - p.z * sinY;
+  let z1 = p.x * sinY + p.z * cosY;
+  let y1 = p.y;
+
+  // 2. Поворот камеры по тангажу (Pitch)
+  const cosP = Math.cos(camPitch), sinP = Math.sin(camPitch);
+  let y2 = y1 * cosP - z1 * sinP;
+  let z2 = y1 * sinP + z1 * cosP + camDist;
+
+  // 3. Перспектива
+  const fov = 500;
+  if (z2 < 10) return null; // отсечение позади камеры
+  const scale = fov / z2;
+
+  return {
+    x: W / 2 + x1 * scale,
+    y: H / 2 + y2 * scale,
+    scale: scale,
+    depth: z2
+  };
+}
+
+// Обновление логики мухи
+function update() {
+  fly.hunger = Math.max(0, fly.hunger - 0.03);
+  fly.energy = Math.max(0, fly.energy - 0.02);
+
+  // Ищем ближайшую еду
+  let nearestFood = null;
+  let minDist = Infinity;
+  for (let f of foods) {
+    let d = Math.hypot(f.x - fly.x, f.y - fly.y, f.z - fly.z);
+    if (d < minDist) {
+      minDist = d;
+      nearestFood = f;
+    }
+  }
+
+  // Целеполагание нейро-контроллера
+  if (nearestFood && (fly.hunger < 70 || !lampOn)) {
+    fly.target.x = nearestFood.x;
+    fly.target.y = nearestFood.y - 4;
+    fly.target.z = nearestFood.z;
+    fly.state = 'TO_FOOD';
+
+    if (minDist < 16) {
+      fly.state = 'EATING';
+      fly.hunger = Math.min(100, fly.hunger + 0.4);
+      nearestFood.life -= 0.4;
+      if (nearestFood.life <= 0) {
+        foods.splice(foods.indexOf(nearestFood), 1);
+      }
+    }
+  } else if (lampOn && fly.hunger > 35) {
+    fly.state = 'TO_LAMP';
+    const t = Date.now() * 0.003;
+    fly.target.x = lampPos.x + Math.cos(t) * 70;
+    fly.target.y = lampPos.y + Math.sin(t * 1.5) * 20;
+    fly.target.z = lampPos.z + Math.sin(t) * 70;
+  } else {
+    fly.state = 'EXPLORE';
+    if (Math.random() < 0.02) {
+      fly.target.x = (Math.random() - 0.5) * 350;
+      fly.target.y = -120 + (Math.random() - 0.5) * 150;
+      fly.target.z = (Math.random() - 0.5) * 350;
+    }
+  }
+
+  // Физика полета
+  if (fly.state !== 'EATING') {
+    const dx = fly.target.x - fly.x;
+    const dy = fly.target.y - fly.y;
+    const dz = fly.target.z - fly.z;
+    const d = Math.hypot(dx, dy, dz) || 1;
+
+    fly.vx += (dx / d) * 0.45;
+    fly.vy += (dy / d) * 0.45;
+    fly.vz += (dz / d) * 0.45;
+
+    fly.vx *= 0.92;
+    fly.vy *= 0.92;
+    fly.vz *= 0.92;
+
+    fly.x += fly.vx;
+    fly.y += fly.vy;
+    fly.z += fly.vz;
+    fly.wingBeat += 0.8;
+  } else {
+    fly.vx = 0; fly.vy = 0; fly.vz = 0;
+  }
+
+  // Границы комнаты
+  fly.x = Math.max(-250, Math.min(250, fly.x));
+  fly.y = Math.max(-230, Math.min(115, fly.y));
+  fly.z = Math.max(-250, Math.min(250, fly.z));
+
+  // Обновление HUD
+  document.getElementById('bar-hunger').style.width = Math.round(fly.hunger) + '%';
+  document.getElementById('bar-energy').style.width = Math.round(fly.energy) + '%';
+  const labels = {
+    'EXPLORE': 'Исследует комнату',
+    'TO_LAMP': 'Кружит у лампы 💡',
+    'TO_FOOD': 'Летит на запах',
+    'EATING': 'Питается 🍬'
+  };
+  document.getElementById('status-text').innerText = labels[fly.state] || 'Полет';
+}
+
+// Отрисовка 3D геометрии
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  // 1. Пол комнаты (Сетка)
+  ctx.strokeStyle = '#1e293b';
+  ctx.lineWidth = 1;
+  const gridSize = 300, step = 60;
+  for (let i = -gridSize; i <= gridSize; i += step) {
+    let p1 = project({ x: i, y: 150, z: -gridSize });
+    let p2 = project({ x: i, y: 150, z: gridSize });
+    if (p1 && p2) {
+      ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+    }
+    let p3 = project({ x: -gridSize, y: 150, z: i });
+    let p4 = project({ x: gridSize, y: 150, z: i });
+    if (p3 && p4) {
+      ctx.beginPath(); ctx.moveTo(p3.x, p3.y); ctx.lineTo(p4.x, p4.y); ctx.stroke();
+    }
+  }
+
+  // 2. Кухонный стол
+  const tableCorners = [
+    { x: -140, y: 120, z: -100 },
+    { x: 140, y: 120, z: -100 },
+    { x: 140, y: 120, z: 100 },
+    { x: -140, y: 120, z: 100 }
+  ];
+  const projTable = tableCorners.map(project).filter(p => p !== null);
+  if (projTable.length === 4) {
+    // Столешница
+    ctx.fillStyle = '#854d0e';
+    ctx.beginPath();
+    ctx.moveTo(projTable[0].x, projTable[0].y);
+    ctx.lineTo(projTable[1].x, projTable[1].y);
+    ctx.lineTo(projTable[2].x, projTable[2].y);
+    ctx.lineTo(projTable[3].x, projTable[3].y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#a16207';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Ножки стола
+    ctx.strokeStyle = '#713f12';
+    ctx.lineWidth = 3;
+    tableCorners.forEach(c => {
+      let top = project(c);
+      let bottom = project({ x: c.x, y: 150, z: c.z });
+      if (top && bottom) {
+        ctx.beginPath(); ctx.moveTo(top.x, top.y); ctx.lineTo(bottom.x, bottom.y); ctx.stroke();
+      }
+    });
+  }
+
+  // 3. Лампа под потолком
+  let pLamp = project(lampPos);
+  let pCeil = project({ x: 0, y: -290, z: 0 });
+  if (pLamp && pCeil) {
+    // Провод
+    ctx.strokeStyle = '#475569';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(pCeil.x, pCeil.y); ctx.lineTo(pLamp.x, pLamp.y); ctx.stroke();
+
+    // Световой ореол
+    if (lampOn) {
+      let grad = ctx.createRadialGradient(pLamp.x, pLamp.y, 5, pLamp.x, pLamp.y, 80 * pLamp.scale);
+      grad.addColorStop(0, 'rgba(254, 240, 138, 0.45)');
+      grad.addColorStop(1, 'rgba(254, 240, 138, 0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.arc(pLamp.x, pLamp.y, 80 * pLamp.scale, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // Лампочка
+    ctx.fillStyle = lampOn ? '#fef08a' : '#475569';
+    ctx.beginPath(); ctx.arc(pLamp.x, pLamp.y, 10 * pLamp.scale, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // 4. Еда на столе
+  for (let f of foods) {
+    let pf = project(f);
+    if (!pf) continue;
+    ctx.fillStyle = f.color;
+    ctx.beginPath();
+    ctx.arc(pf.x, pf.y, f.size * pf.scale * 0.9, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // 5. Муха в 3D
+  let pf = project(fly);
+  if (pf) {
+    const s = pf.scale;
+
+    // Тень на столе
+    let pShadow = project({ x: fly.x, y: 118, z: fly.z });
+    if (pShadow) {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+      ctx.beginPath();
+      ctx.ellipse(pShadow.x, pShadow.y, 8 * pShadow.scale, 4 * pShadow.scale, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Тельце мухи
+    ctx.fillStyle = '#0f172a';
+    ctx.beginPath();
+    ctx.ellipse(pf.x, pf.y, 9 * s, 6 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Глаза
+    ctx.fillStyle = '#ef4444';
+    ctx.beginPath();
+    ctx.arc(pf.x + 5 * s, pf.y - 2 * s, 2.5 * s, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Крылья с анимацией
+    ctx.fillStyle = 'rgba(224, 242, 254, 0.8)';
+    const flap = Math.sin(fly.wingBeat) * 10 * s;
+    
+    // Левое крыло
+    ctx.beginPath();
+    ctx.ellipse(pf.x - 4 * s, pf.y - 8 * s - flap, 7 * s, 4 * s, -0.4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Правое крыло
+    ctx.beginPath();
+    ctx.ellipse(pf.x - 4 * s, pf.y + 8 * s + flap, 7 * s, 4 * s, 0.4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
